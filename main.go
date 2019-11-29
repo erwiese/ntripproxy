@@ -4,32 +4,42 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	ntripCli "github.com/erwiese/ntrip/client"
+	ntrip "github.com/erwiese/ntrip/client"
 )
 
 const (
+	version = "0.1"
+
 	// Attempts stores the numner of attempts for the same request
 	Attempts int = iota
 	Retry
 )
 
+var sourcetable *ntrip.Sourcetable
+
 // Backend holds the data about a NtripCaster.
 type Backend struct {
-	*ntripCli.Client // Caster client
-	URL              *url.URL
-	Alive            bool
-	mux              sync.RWMutex
-	ReverseProxy     *httputil.ReverseProxy
+	*ntrip.Client // Caster client
+	URL           *url.URL
+	sourcetable   *ntrip.Sourcetable
+	Alive         bool
+	mux           sync.RWMutex
+	ReverseProxy  *httputil.ReverseProxy
+}
+
+type backendOpts struct {
+	mountpoint string
 }
 
 // SetAlive for this backend.
@@ -74,13 +84,19 @@ func (bp *BackendPool) MarkBackendStatus(casterURL *url.URL, alive bool) {
 }
 
 // GetNextPeer returns next active peer to take a connection
-func (bp *BackendPool) GetNextPeer() *Backend {
+func (bp *BackendPool) GetNextPeer(opts backendOpts) *Backend {
 	// loop entire backends to find out an Alive backend
 	next := bp.NextIndex()
 	l := len(bp.backends) + next // start from next and move a full cycle
 	for i := next; i < l; i++ {
 		idx := i % len(bp.backends)     // take an index by modding
 		if bp.backends[idx].IsAlive() { // if we have an alive backend, use it and store if its not the original one
+			if opts.mountpoint != "" {
+				if _, found := bp.backends[idx].sourcetable.HasStream(opts.mountpoint); found == false {
+					continue
+				}
+			}
+
 			if i != next {
 				atomic.StoreUint64(&bp.current, uint64(idx))
 			}
@@ -92,16 +108,34 @@ func (bp *BackendPool) GetNextPeer() *Backend {
 
 // HealthCheck pings the backends and update the status
 func (bp *BackendPool) HealthCheck() {
+	var err error
+	stables := make([]*ntrip.Sourcetable, 0, len(bp.backends))
 	for _, b := range bp.backends {
 		status := "up"
+		alive := true
 		//alive := isCasterAlive(b.URL)
-		alive := b.IsCasterAlive()
-		b.SetAlive(alive)
-		if !alive {
+		//alive := b.IsCasterAlive()
+		st, err := b.ParseSourcetable()
+		if err != nil {
 			status = "down"
+			alive = false
+		} else {
+			stables = append(stables, st)
 		}
+		b.sourcetable = st
+		b.SetAlive(alive)
+		// if !alive {
+		// 	status = "down"
+		// }
 		log.Printf("%s is %s\n", b.URL, status)
 	}
+
+	// Update combined sourcetable
+	sourcetable, err = ntrip.MergeSourcetables(stables...)
+	if err != nil {
+		log.Printf("Could not build the combined sourcetable: %v\n", err)
+	}
+
 }
 
 // GetAttemptsFromContext returns the attempts for request
@@ -129,8 +163,9 @@ func lb(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if req.URL.Path == "/" {
-		log.Println("request sourcetable")
+	path := req.URL.Path
+	if path == "/" {
+		log.Println("request combined sourcetable")
 		// TODO: build common sourcetable
 
 		// w.Header().Set("Trailer", "AtEnd1, AtEnd2")
@@ -139,14 +174,34 @@ func lb(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Server", "NTRIP BKG Proxy 0.1/2.0")
 		w.Header().Set("Content-Type", "gnss/sourcetable")
 		w.Header().Set("Connection", "close")
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "Here comes the combined sourcetable...\n")
+		//w.WriteHeader(http.StatusOK) // implicit
+		err := sourcetable.Write(w)
+		if err != nil {
+			log.Printf("Could not write sourcetable: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		//io.WriteString(w, "Here comes the combined sourcetable...\n")
 		return
 	}
 
-	peer := backendPool.GetNextPeer()
+	log.Printf("request stream: %s", path)
+	if strings.HasPrefix(path, "?") {
+		http.Error(w, "Service not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	peer := backendPool.GetNextPeer(backendOpts{mountpoint: strings.TrimPrefix(path, "/")})
 	if peer != nil {
+
 		log.Printf("Forward req to %s", peer.URL.Hostname())
+
+		// // Update the headers to allow for SSL redirection
+		// req.URL.Host = url.Host
+		// req.URL.Scheme = url.Scheme
+		// req.Header.Set("X-Forwarded-Host", req.Header.Get("Host"))
+		// req.Host = url.Host
 
 		// Dump request
 		dump, _ := httputil.DumpRequest(req, false)
@@ -183,14 +238,19 @@ func healthCheck() {
 	}
 }
 
+func logConnState(conn net.Conn, state http.ConnState) {
+	log.Printf("client %v to remote %v conn state: %v", conn.LocalAddr(), conn.RemoteAddr(), state)
+}
+
 var backendPool BackendPool
 
 func main() {
 	var serverList string
 	var port int
-	flag.StringVar(&serverList, "backends", "", "Load balanced backends, use commas to separate")
-	flag.IntVar(&port, "port", 3030, "Port to serve")
-	flag.Parse()
+	fs := flag.NewFlagSet("ntripproxy/"+version, flag.ExitOnError)
+	fs.StringVar(&serverList, "backends", "", "Load balanced backends, use comma to separate")
+	fs.IntVar(&port, "port", 3030, "Port to serve")
+	fs.Parse(os.Args[1:])
 
 	if len(serverList) == 0 {
 		log.Fatal("Please provide one or more backends to load balance")
@@ -227,7 +287,10 @@ func main() {
 			lb(writer, req.WithContext(ctx))
 		}
 
-		cli, err := ntripCli.New(serverURL.String(), ntripCli.Options{})
+		cli, err := ntrip.New(serverURL.String(), ntrip.Options{})
+		if err != nil {
+			log.Fatal(err)
+		}
 
 		backendPool.AddBackend(&Backend{
 			Client:       cli,
@@ -235,13 +298,18 @@ func main() {
 			Alive:        true,
 			ReverseProxy: proxy,
 		})
+
 		log.Printf("Configured backend: %s\n", serverURL)
+
+		// to get the combined sourcetable
+		backendPool.HealthCheck()
 	}
 
 	// create http server
 	server := http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: http.HandlerFunc(lb),
+		Addr:      fmt.Sprintf(":%d", port),
+		Handler:   http.HandlerFunc(lb),
+		ConnState: logConnState,
 	}
 
 	// start health checking
