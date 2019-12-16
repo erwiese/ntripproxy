@@ -8,7 +8,7 @@ Description:
 
 Example:
 
-To add the following NtripCaster backends
+To start the proxy with the following NtripCaster backends
 - http://localhost:2101
 - http://localhost:2102
 ```bash
