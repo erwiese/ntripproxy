@@ -4,7 +4,7 @@ Reverse proxy for Ntrip broadcasters
 The proxy returns a combined sourcetable from all backend casters. 
 
 Description:
-   see https://kasvith.github.io/posts/lets-create-a-simple-lb-go/
+   see https://kasvith.github.io/posts/lets-create-a-simple-lb-go/ whereof the code is adopted
 
 Example:
 
