@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	ntrip "github.com/erwiese/ntrip/client"
+	"github.com/de-bkg/gognss/pkg/ntrip"
 )
 
 const (
@@ -287,7 +287,7 @@ func main() {
 			lb(writer, req.WithContext(ctx))
 		}
 
-		cli, err := ntrip.New(serverURL.String(), ntrip.Options{})
+		cli, err := ntrip.NewClient(serverURL.String(), ntrip.Options{})
 		if err != nil {
 			log.Fatal(err)
 		}
