@@ -1,5 +1,9 @@
 # ntripproxy
+
+[![Open in Visual Studio Code](https://open.vscode.dev/badges/open-in-vscode.svg)](https://open.vscode.dev/erwiese/ntripproxy)
+
 Reverse proxy for Ntrip broadcasters
+
 
 The proxy returns a combined sourcetable from all backend casters. 
 
